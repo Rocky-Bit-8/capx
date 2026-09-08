@@ -1,0 +1,5 @@
+benchmark_root: /home/rocky/Code/cap-x-main/capx/third_party/LIBERO-PRO/libero
+bddl_files: /home/rocky/Code/cap-x-main/capx/third_party/LIBERO-PRO/libero/bddl_files
+init_states: /home/rocky/Code/cap-x-main/capx/third_party/LIBERO-PRO/libero/init_files
+datasets: /home/rocky/Code/cap-x-main/capx/third_party/LIBERO-PRO/datasets
+assets: /home/rocky/Code/cap-x-main/capx/third_party/LIBERO-PRO/libero/assets

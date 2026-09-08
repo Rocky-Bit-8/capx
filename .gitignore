@@ -1,0 +1,62 @@
+# General
+.DS_Store
+__pycache__/
+*.py[cod]
+*.egg-info/
+.Python
+.molmo311
+.molmo-venv
+.setup-venv
+.venv
+.venv-libero
+.venv-libero.py312
+capx-molmo-wheels
+env/
+.env
+.openrouterkey
+.nvinferencekeys
+.capx_skills.json
+.pytest_cache/
+.ruff_cache/
+
+scripts/nv_*
+# Build
+build/
+dist/
+node_modules/
+
+# Editors
+.idea/
+.vscode/
+checkpoints/
+libero_dataset/
+.cursor/
+
+output/
+old_output/
+outputs/
+output_debug/
+outputs**
+curobo_debug/
+core.*
+wandb/
+.webui_secret_key
+
+*.jpg
+*.png
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+*.ico
+*.webp
+check.md
+
+# Large model weights & downloaded wheels
+sam2_hiera_large.pt
+sam3_repacked.pt
+download/
+molmo/
+
+# Vendored third-party source
+capx/third_party/

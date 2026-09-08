@@ -1,0 +1,34 @@
+{
+  "source": "MuJoCo NutAssemblySquare raw observation",
+  "seed": 0,
+  "camera_key": "robot0_robotview",
+  "rgb_shape": [
+    512,
+    512,
+    3
+  ],
+  "depth_shape": [
+    512,
+    512
+  ],
+  "depth_unit": "meters",
+  "depth_min_m": 1.0499989986419678,
+  "depth_max_m": 2.0000131130218506,
+  "intrinsics": [
+    [
+      618.0386962890625,
+      0.0,
+      256.0
+    ],
+    [
+      0.0,
+      618.0386962890625,
+      256.0
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ]
+}

@@ -1,0 +1,791 @@
+Nut Assembly 总体层级
+
+  配置层
+    ↓
+  任务封装层
+    ↓
+  VDM / Trial 编排层
+    ↓
+  模型生成代码
+    ↓
+  Franka Nut Assembly API
+    ↓
+  Low-level Robosuite 仿真环境
+    ↓
+  Robosuite 物理仿真与成功判定
+
+  并行依赖：
+
+  Nut Assembly API
+    ├─ IK / PyRoKi
+    └─ SAM3 视觉服务
+
+  1. 配置层
+
+  文件：
+
+  env_configs/nut_assembly/franka_robosuite_nut_assembly_multiturn_vdm.yaml
+
+  主要管理：
+
+  - 使用哪个任务环境
+  - 使用哪个 low-level 环境
+  - 注册哪些 API
+  - VDM / multiturn 参数
+  - SAM3、PyRoKi 服务地址
+  - 模型和 trial 参数
+
+  当前配置核心关系大致是：
+
+  env:
+    _target_: capx.envs.tasks.franka.franka_nut_assembly.FrankaNutAssemblyCodeEnv
+    low_level: franka_robosuite_nut_assembly_low_level_visual
+    apis:
+      - FrankaControlNutAssemblyVisualApi
+
+  所以这个 YAML 本身不负责机械臂运动，也不负责判断 nut 是否装好，它只负责组装系统。
+
+  ———
+
+  2. 任务封装层
+
+  文件：
+
+  capx/envs/tasks/franka/franka_nut_assembly.py
+
+  管理：
+
+  - Nut Assembly 的任务描述
+  - 给模型的 prompt
+  - 可执行 API 的说明
+  - oracle code
+  - 任务环境类 FrankaNutAssemblyCodeEnv
+
+  公共执行逻辑在：
+
+  capx/envs/tasks/base.py
+
+  管理：
+
+  - 创建 low-level 环境
+  - 注册 goto_pose、夹爪等 API
+  - 执行模型生成的 Python code
+  - 调用环境 step
+  - 计算 reward、completed、truncated
+  - 记录动作诊断信息
+
+  这里属于“任务代码怎么被执行”，不是具体的关节控制。
+
+  ———
+
+  3. VDM / Trial 编排层
+
+  CLI：
+
+  capx/envs/trial.py
+
+  Web UI：
+
+  capx/web/async_trial_runner.py
+
+  管理：
+
+  生成代码 block
+    ↓
+  执行 block
+    ↓
+  获取视频/观测
+    ↓
+  VDM 判断 FINISH 或 REGENERATE
+    ↓
+  继续执行或重新生成 block
+
+  需要特别明确：
+
+  > VDM 的一个 block 当前理论上是一个完整流程，而不是自动拆开的“抓取阶段”“移动阶段”“安装阶段”。
+
+  也就是说模型可能生成：
+
+  回 home
+  观察 nut
+  获取 nut pose
+  获取 peg pose
+  抓取
+  移动
+  释放
+
+  VDM 只负责决定“执行这段代码后是否继续”，它不会自动保证每个 block 完整完成任务。
+
+  这里管理的问题：
+
+  - block 是否完整
+  - 是否重新生成
+  - regenerate 后是否 reset
+  - 是否错误地在同一个 episode 中反复执行
+  - 是否过早 FINISH
+  - VDM 反馈是否能正确反映动作结果
+
+  之前出现的“刚抓就停”“几乎没有动作”，首先应该检查这一层生成的代码和执行结果。
+
+  ———
+
+  4. Nut Assembly 控制 API 层
+
+  视觉 API：
+
+  capx/integrations/franka/nut_assembly_visual.py
+
+  特权 API：
+
+  capx/integrations/franka/nut_assembly_privileged.py
+
+  这里管理：
+
+  - 获取 nut / peg 位姿
+  - goto_pose
+  - 夹爪打开、闭合
+  - 回 home
+  - 抓取位姿
+  - 目标位姿转换
+  - 调用 IK
+  - 把 IK 结果交给 low-level 环境执行
+
+  当前视觉版本的关键问题在这里：
+
+  sample_grasp_pose()
+
+  目前实际上主要返回视觉估计的物体 pose，并不是真正的抓取规划结果。因此：
+
+  - 可能拿到 nut 中心而不是 handle 抓取点
+  - 细长 handle 的方向可能估计错误
+  - 目标姿态可能不适合夹爪接近
+  - 后续动作即使执行了，也可能抓空
+
+  “抓取点不对”归这一层和 SAM3 视觉层，不归 VDM。
+
+  ———
+
+  5. Low-level Robosuite 环境层
+
+  文件：
+
+  capx/envs/simulators/robosuite_nut_assembly.py
+
+  公共基础环境：
+
+  capx/envs/simulators/robosuite_base.py
+
+  这里真正管理：
+
+  - 创建 NutAssemblySquare
+  - 机器人和物体 reset
+  - home joint position
+  - 关节控制
+  - move_to_joints_blocking
+  - 单步仿真
+  - 仿真步数计数
+  - observation / camera
+  - 视频帧
+  - max_steps
+  - episode 是否 terminated / truncated
+
+  “动作到底有没有执行”“执行了几步”“是否因为 horizon 被截断”，主要归这一层。
+
+  之前重复记步的问题也在这里：
+
+  - _step_once() 曾经重复增加 _sim_step_count
+  - move_to_joints_blocking() 也曾经重复计步
+  - 这会导致环境比实际动作更快达到最大步数
+
+  ———
+
+  6. Robosuite 物理与成功判定层
+
+  文件：
+
+  capx/third_party/libero_dependencies/robosuite/robosuite/environments/manipulation/nut_assembly.py
+
+  主要管理：
+
+  - square nut 的物理对象
+  - peg 和 nut 的几何关系
+  - nut 是否在 peg 上
+  - gripper 是否已经释放
+  - _check_success()
+  - 最终任务完成判定
+
+  因此：
+
+  - “模型有没有把 nut 放到 peg 上”属于这一层判断
+  - “为什么放上了但仍然失败”要检查这里的几何阈值和释放条件
+  - 但“模型根本没移动”不属于这一层
+
+  ———
+
+  7. IK / 运动学层
+
+  文件：
+
+  capx/integrations/motion/pyroki.py
+
+  服务启动文件：
+
+  capx/serving/launch_pyroki_server.py
+
+  现在应该保持两种后端明确分开：
+
+  仿真：
+  Franka API
+    → local PyRoKi
+    → 当前 MuJoCo sim
+    → 计算关节角
+
+  真机：
+  Franka API
+    → remote PyRoKi HTTP server
+    → 根据真机状态求 IK
+    → 真机控制器
+
+  这里管理：
+
+  - 目标末端 pose 转关节角
+  - 仿真 MuJoCo sim 的获取
+  - 真机 HTTP IK 服务
+  - 奇异位姿和 IK 失败
+
+  “真机初始位置奇异导致 IK 失败”属于 IK 层和真机控制层；不应让仿真 API 去寻找真机或反过来。
+
+  ———
+
+  8. SAM3 视觉层
+
+  Nut Assembly API 调用 SAM3 服务，主要负责：
+
+  文本目标
+    → segmentation mask
+    → 深度点云
+    → OBB / 物体中心 / 姿态
+    → 返回 object pose
+
+  这里管理：
+
+  - extruded handle of the brown square nut 是否能被正确分割
+  - mask 是否覆盖正确物体
+  - 深度点云是否有效
+  - OBB 方向是否稳定
+  - 视觉 pose 是否偏移
+
+  所以“每次获得的位置都一样”需要区分：
+
+  - 如果视觉输出 pose 一样：查 SAM3、深度和 OBB
+  - 如果 API 输出 pose 不一样但机器人位置不变：查 IK 或 low-level step
+  - 如果机器人动了但任务仍失败：查抓取姿态、放置变换和成功判定
+
+  ———
+
+  之前讨论的问题对应关系
+
+   问题                                  主要归属
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   VDM block 是否完整                    trial.py、async_trial_runner.py
+  ────────────────────────────────────  ─────────────────────────────────────────────────────────────
+   regenerate 是否重复执行旧 episode     trial.py、async_trial_runner.py
+  ────────────────────────────────────  ─────────────────────────────────────────────────────────────
+   过早 FINISH                           VDM / trial 编排层
+  ────────────────────────────────────  ─────────────────────────────────────────────────────────────
+   max step / horizon 截断               robosuite_nut_assembly.py、robosuite_base.py、tasks/base.py
+  ────────────────────────────────────  ─────────────────────────────────────────────────────────────
+   重复计步                              robosuite_nut_assembly.py
+  ────────────────────────────────────  ─────────────────────────────────────────────────────────────
+   动作是否真的执行                      low-level 环境层
+  ────────────────────────────────────  ─────────────────────────────────────────────────────────────
+   每次目标位置是否一样                  API 层、视觉层、IK 层共同排查
+  ────────────────────────────────────  ─────────────────────────────────────────────────────────────
+   抓取点不正确                          nut_assembly_visual.py、SAM3
+  ────────────────────────────────────  ─────────────────────────────────────────────────────────────
+   sample_grasp_pose 不是真正抓取规划    nut_assembly_visual.py
+  ────────────────────────────────────  ─────────────────────────────────────────────────────────────
+   插入位置计算简单平移                  API 控制层或任务生成代码
+  ────────────────────────────────────  ─────────────────────────────────────────────────────────────
+   仿真 IK / 真机 IK 混用                pyroki.py、Franka API
+  ────────────────────────────────────  ─────────────────────────────────────────────────────────────
+   初始位姿奇异                          IK 层、真机控制层
+  ────────────────────────────────────  ─────────────────────────────────────────────────────────────
+   nut 已放置但 success 为 false         Robosuite nut_assembly.py
+  ────────────────────────────────────  ─────────────────────────────────────────────────────────────
+   视频看起来没有动作                    low-level step、视频采样、VDM block 执行逻辑
+
+  当前建议的排查顺序
+
+  1. 模型生成的 block
+  2. block 是否调用了 goto_pose / gripper
+  3. API 收到的目标 pose
+  4. IK 输出关节角是否变化
+  5. low-level 实际执行的 joint trajectory
+  6. MuJoCo 中物体和末端位姿变化
+  7. Robosuite success 判定
+  8. VDM 是否误判 FINISH
+
+  也就是说，下一步不应先改 reward 或 success 判定，而应该先把一次 nut assembly block 的：
+
+  目标 pose
+  → IK 关节角
+  → 实际执行关节角
+  → 每步末端位置
+  → nut 位置
+  → gripper 状态
+
+  完整记录出来。这样才能确定问题是在“模型没有产生动作”、 “API 没执行”、 “IK 输出不变”，还是“仿真执行了但抓取失败”。
+
+  ———
+
+  9. 终止、截断和提前结束的区别
+
+  Nut Assembly 中有多个层级都可能结束流程，不能只看 max_steps：
+
+  1) 任务成功终止
+
+  文件：
+
+  capx/envs/tasks/base.py
+  capx/third_party/libero_dependencies/robosuite/robosuite/environments/manipulation/nut_assembly.py
+
+  CodeExecutionEnvBase.step() 会根据 reward 判断：
+
+  terminated = reward == 1.0
+
+  Robosuite 的 NutAssemblySquare._check_success() 负责判断 nut 是否正确套到 peg 上，并检查释放条件。成功时 episode 可以被视为 terminated，即使 max_steps 还没有用完。
+
+  2) 步数截断
+
+  文件：
+
+  capx/envs/simulators/robosuite_nut_assembly.py
+  capx/envs/simulators/robosuite_base.py
+  capx/envs/tasks/base.py
+
+  仿真步数由 low-level 环境的 _sim_step_count 记录。任务层在一个代码 block 执行结束后检查：
+
+  _sim_step_count >= max_steps
+
+  这表示 truncated=True。
+
+  注意：max_steps 通常不会在 Python block 中途主动打断代码。一个 block 内的 goto_pose、夹爪和多段运动仍会继续执行，除非发生异常、Robosuite done 或控制函数自身返回。
+
+  reset() 中的 warmup 也会执行若干仿真步；因此需要区分 reset 后的初始步数和真正动作产生的步数。
+
+  3) Robosuite episode done
+
+  文件：
+
+  capx/envs/simulators/robosuite_base.py
+  capx/envs/simulators/robosuite_nut_assembly.py
+
+  Robosuite 内部有自己的 done 状态。episode 到达 horizon 或其他终止条件后，继续调用 robosuite_env.step() 会触发：
+
+  ValueError: executing action in terminated episode
+
+  这和任务层最后计算的 truncated 不完全等价。排查时需要同时记录：
+
+  - low-level_env._sim_step_count
+  - low-level_env.max_steps
+  - low-level_env.robosuite_env.done
+  - env.step() 返回的 terminated
+  - env.step() 返回的 truncated
+  - info["stderr"]
+
+  4) VDM 主动 FINISH
+
+  文件：
+
+  capx/envs/trial.py
+  capx/web/async_trial_runner.py
+
+  VDM 选择 finish 后，trial loop 会直接 break。这种结束不代表任务成功，也不代表步数用完。典型状态是：
+
+  Task Completed=False
+  Truncated=False
+  Num Finishes=1
+
+  此时应判断为 VDM 误判或反馈不足，而不是仿真 horizon 太短。
+
+  5) 代码异常或控制函数提前返回
+
+  文件：
+
+  capx/envs/tasks/base.py
+  capx/integrations/franka/control.py
+  capx/integrations/franka/nut_assembly_visual.py
+  capx/integrations/franka/nut_assembly_privileged.py
+
+  模型代码在一个 block 中按顺序执行。任意 API 抛出异常后，后面的动作不会执行。例如 IK 失败、目标位姿非法、terminated episode、数组形状错误，都会表现为“前面动作执行了，后面没有动作”。
+
+  goto_pose 内部的 move_to_joints_blocking 还有自己的 max_steps 和 tolerance，它可能在达到局部关节误差阈值后返回，并不代表整个 Nut Assembly 流程完成。
+
+  诊断原则：
+
+  - max_steps 未耗尽且 VDM FINISH：编排层结束
+  - max_steps 未耗尽且 stderr 非空：代码/API/Robosuite 异常
+  - max_steps 未耗尽、stderr 为空、目标 pose 不变：视觉或 IK 输出问题
+  - 目标 pose 变化、关节变化为零：IK 或 low-level 控制问题
+  - 关节变化明显但画面不变：渲染采样、相机或 Web 显示链路问题
+
+  ———
+
+  10. Web 端 MuJoCo 渲染层级
+
+  Web UI 的渲染不是 VDM 本身完成的，而是由“MuJoCo 仿真状态”“相机渲染”“WebSocket/HTTP 事件”和“Viser 3D 页面”共同组成。
+
+  整体链路：
+
+  浏览器前端
+    ↓ WebSocket 事件 / HTTP 请求
+  capx/web/server.py
+    ↓ 创建和管理 session
+  capx/web/session_manager.py
+    ↓ 异步调度，但环境操作进入单线程 executor
+  capx/web/async_trial_runner.py
+    ↓ instantiate、reset、env.step(code)、env.render()
+  capx/envs/tasks/base.py
+    ↓ 转发到 low-level 环境
+  capx/envs/simulators/robosuite_nut_assembly.py
+    ↓ robosuite_env.step() / sim.data / camera
+  MuJoCo / Robosuite
+
+  1) Web 服务与 session 层
+
+  文件：
+
+  capx/web/server.py
+  capx/web/session_manager.py
+  capx/web/models.py
+
+  负责：
+
+  - 接收前端加载配置和启动 trial 的请求
+  - 创建 session
+  - 建立 WebSocket
+  - 转发环境初始化、执行结果、视觉反馈和 trial 完成事件
+  - 保存当前 session 的 env、Viser 端口和取消状态
+
+  server.py 还负责 Viser reverse proxy。Viser 默认使用 8080，如果端口被占用会选择其他端口；服务端会读取当前环境实际创建的 Viser 端口，再把代理固定到该端口，避免连接到旧 trial 的 Viser 实例。
+
+  2) 异步 trial 执行层
+
+  文件：
+
+  capx/web/async_trial_runner.py
+
+  负责：
+
+  - 强制 Web UI 环境开启 enable_render 和 viser_debug
+  - 创建单 worker ThreadPoolExecutor
+  - 在环境线程中执行 instantiate 和 reset
+  - 在同一个环境线程中执行 env.step(code) 后再调用 env.render()
+  - 将 frame 转成 base64，通过 VisualFeedbackEvent 发给前端
+  - 将代码执行结果和 execution steps 通过 WebSocket 发给前端
+
+  MuJoCo 的 OpenGL/OSMesa context 是线程相关的。因此 reset、仿真 step 和 render 不能随意分散到不同线程。当前实现使用单线程 executor，保证：
+
+  env.step(code)
+    → MuJoCo 状态更新
+    → env.render()
+    → 返回 post_step_frame
+
+  在同一个线程内完成。
+
+  3) 任务层渲染转发
+
+  文件：
+
+  capx/envs/tasks/base.py
+
+  负责把 high-level CodeExecutionEnv 的接口转发给 low-level 环境：
+
+  - render() 转发到 low_level_env.render()
+  - render_wrist() 转发腕部相机
+  - enable_video_capture() 开启视频帧缓存
+  - get_video_frames() 读取缓存帧
+  - get_video_frames_range() 读取某个 block 的帧区间
+
+  env.step(code) 执行完成后，如果启用了 viser_debug，还会调用 low-level 的 _update_viser_server()，把最终仿真状态同步到 Viser。
+
+  4) Nut Assembly low-level 相机渲染
+
+  文件：
+
+  capx/envs/simulators/robosuite_nut_assembly.py
+
+  构造 Robosuite 时根据 enable_render 选择：
+
+  - has_renderer
+  - has_offscreen_renderer
+  - camera_names=["birdview"]
+  - camera_depths=True
+
+  该文件负责：
+
+  - 调用 robosuite_env.step()
+  - 从 sim.data 读取关节、末端和物体状态
+  - 获取 birdview RGB 和 depth
+  - 把深度转换为点云
+  - 生成任务 observation
+  - 生成视频帧
+  - 在 Viser 中显示机器人、nut、peg 和坐标系
+
+  其中 RGB/depth 是视觉 API 和视频反馈使用的数据；Viser 的三维场景是另一条调试显示链路。
+
+  5) 视频帧链路
+
+  文件：
+
+  capx/envs/simulators/robosuite_base.py
+  capx/envs/simulators/robosuite_nut_assembly.py
+  capx/utils/video_utils.py
+  capx/web/async_trial_runner.py
+
+  仿真每执行若干步后按 _subsample_rate 采帧，通常不是每个 physics step 都保存一张图片。Nut Assembly 当前的采样率为 5，因此视频帧数量小于仿真步数是正常现象。
+
+  Web UI 中的 post_step_frame 是 block 执行结束后额外调用 env.render() 得到的当前画面；它不等价于完整的动作轨迹。完整视频需要依赖 enable_video_capture 和 frame buffer。
+
+  6) Viser 三维调试链路
+
+  文件：
+
+  capx/envs/simulators/robosuite_nut_assembly.py
+  capx/web/async_trial_runner.py
+  capx/web/server.py
+
+  当 viser_debug=True 时，Nut Assembly low-level 环境创建 ViserServer，并在 _update_viser_server() 中更新：
+
+  - MuJoCo/URDF 机器人位姿
+  - 末端和夹爪坐标系
+  - square nut 坐标系
+  - nut handle 坐标系
+  - peg 坐标系
+  - 相机图像和点云
+  - grasp frame（如果 API 设置了）
+
+  Viser 页面通过独立端口提供三维场景，Web server 只做代理和端口转发。Viser 画面不直接决定 MuJoCo 状态，也不会驱动机器人；它只是读取并显示 low-level 环境中的最新状态。
+
+  7) Web 端出现“画面不动”时的排查
+
+  按以下顺序区分：
+
+  - env.step(code) 的 motion diagnostics 是否显示 ee_delta 或 joint_delta
+  - _sim_step_count 是否增加
+  - post_step_frame 是否由 env.render() 成功返回
+  - video frame buffer 是否增加
+  - Viser 的 _update_viser_server() 是否被调用
+  - server.py 代理的端口是否是当前 session 的 Viser 端口
+  - 浏览器 WebSocket 是否仍然连接
+
+  如果 motion diagnostics 有明显位移但浏览器不动，问题在渲染或 Web 传输层；如果 diagnostics 本身为零，问题在模型代码、API、IK 或 low-level 控制层，不能通过修改前端渲染解决。
+
+
+结论如下。
+
+  1. 当前 get_pose 没有使用 Contact GraspNet
+
+  当前视觉 Nut Assembly 的实际链路是：
+
+  SAM3 mask
+  → 深度点云
+  → Open3D OBB
+  → OBB/掩码中心
+  → get_object_pose
+
+  对应文件：
+
+  capx/integrations/franka/nut_assembly_visual.py
+
+  关键代码是：
+
+  sample_grasp_pose()
+      return self.get_object_pose(object_name)
+
+  所以当前：
+
+  - get_object_pose：估计物体位置和 OBB 姿态
+  - sample_grasp_pose：实际上只是再次调用 get_object_pose
+  - 没有调用 Contact GraspNet
+  - 返回的不是可靠的夹爪接触位姿
+  - 对细长 handle、方孔、遮挡和姿态尤其不可靠
+
+  Contact GraspNet 只在通用 Franka API 中存在，主要位于：
+
+  capx/integrations/franka/control.py
+
+  但当前 Nut Assembly 配置使用的是：
+
+  FrankaControlNutAssemblyVisualApi
+
+  因此 Contact GraspNet 根本没有进入 Nut Assembly 的执行路径。
+
+  这就是当前抓取准确率低的首要原因。
+
+  ———
+
+  2. SAM3 不一定需要 Molmo，但当前 SAM3 用法确实不足
+
+  理论上 Nut Assembly 不必依赖 Molmo。因为这是一个固定场景，可以使用：
+
+  SAM3 分割
+  + 深度
+  + 几何规则
+  + 物体尺寸/形状验证
+
+  完成识别。
+
+  但当前实现存在几个问题：
+
+  第一，SAM3 不是严格的分类器。
+
+  当前调用：
+
+  results = self.sam3_seg_fn(image, text_prompt=object_name)
+  best = max(results, key=lambda result: float(result["score"]))
+
+  它只是从文本 prompt 生成候选 mask，然后取最高分 mask。没有验证：
+
+  - 是否真的是 square nut
+  - 是否包含 handle
+  - 是否是圆形 nut
+  - mask 的宽高比例
+  - OBB 是否接近方形
+  - 中心孔是否存在
+  - mask 是否和预期区域一致
+
+  因此即使 prompt 是：
+
+  white hollow center of the brown square nut
+
+  SAM3 也可能返回整个 nut、圆形区域或其他相似区域。
+
+  第二，当前 mask 结果没有做形状约束。
+
+  方形 nut 和圆形 nut 应该通过几何特征二次筛选：
+
+  外轮廓接近四边形
+  两条主边长度接近
+  角点数量接近 4
+  外接矩形长宽比接近 1
+  中心孔也接近方形
+
+  当前代码只对点云做：
+
+  o3d.geometry.PointCloud()
+  get_oriented_bounding_box()
+
+  OBB 只能给出一个包围盒，不能证明它是方形 nut，也不能证明它不是圆形 nut。
+
+  第三，白色中心区域很难直接靠 SAM3 识别。
+
+  白色中心孔属于：
+
+  物体内部的空洞/背景区域
+
+  而不是独立实体。分割模型可能更倾向于返回外部的 nut mask，而不是内部孔洞。
+
+  更可靠的方案是：
+
+  先识别 square nut 外轮廓
+  → 投影到图像
+  → 在外轮廓内部寻找空洞
+  → 用深度判断中心孔是否为空
+  → 使用几何中心和孔边界确定插入轴
+
+  而不是把“白色 hollow center”当成普通物体交给 SAM3。
+
+  第四，当前深度取值也不稳定。
+
+  代码中：
+
+  median_depth = np.min(depth[mask_bool])
+
+  变量名叫 median_depth，实际使用的是最小深度。只要 mask 边缘有噪声或错误像素，最小深度就可能来自错误表面，导致位置偏移。
+
+  所以当前不应简单认为“必须安装 Molmo”。更准确的判断是：
+
+  Molmo 可以帮助提供点提示，改善 SAM3 的候选区域选择；
+  但 Molmo 不能替代几何验证，也不能自动生成可靠抓取姿态。
+
+  对于这个固定 Nut Assembly 任务，优先级应该是：
+
+  固定场景几何识别
+  > SAM3 mask 二次筛选
+  > Contact GraspNet 或专用方形 nut 抓取规则
+  > Molmo 辅助定位
+
+  ———
+
+  3. 仅使用 IK 不足以让机械臂优雅、可靠地到达目标
+
+  当前运动链路是：
+
+  目标末端 pose
+  → PyRoKi IK
+  → 一个目标关节配置
+  → move_to_joints_blocking
+  → Robosuite joint controller
+
+  对应文件：
+
+  - capx/integrations/motion/pyroki.py
+  - capx/integrations/franka/nut_assembly_visual.py
+  - capx/envs/simulators/robosuite_nut_assembly.py
+
+  当前 move_to_joints_blocking() 的本质是反复发送同一个关节目标：
+
+  while error > tolerance:
+      robosuite_env.step(target_joint_action)
+
+  它不是完整的运动规划器，因此没有明确保证：
+
+  - 碰撞规避
+  - 关节速度限制
+  - 关节加速度限制
+  - 末端笛卡尔直线轨迹
+  - 避免奇异位形
+  - 抓取过程中的姿态连续性
+  - 插入时的轴向对准
+  - 放置过程中的柔顺控制
+
+  它可以完成：
+
+  从当前姿态移动到一个简单目标姿态
+
+  但不能保证：
+
+  以平滑、避碰、连续、适合抓取和插入的方式完成完整流程
+
+  目前 z_approach 只提供了有限的两个 waypoint：
+
+  上方接近点
+  → 目标点
+
+  这对于简单抓取有帮助，但对于 Nut Assembly 仍然不够。尤其是：
+
+  抓取 handle
+  → 抬升
+  → 平移到 peg
+  → 垂直插入
+  → 释放
+
+  应该至少具备明确的分段轨迹和每段的姿态约束。
+
+  当前三个问题的优先级
+
+  第一优先级：
+  sample_grasp_pose 改为真正的抓取规划，而不是 OBB 中心
+
+  第二优先级：
+  square nut / round nut 做几何分类和 mask 验证
+
+  第三优先级：
+  IK 后增加轨迹规划、碰撞检查和分段 waypoint
+
+  所以目前任务低成功率并不是单一的 SAM3 问题，而是：
+  + get_pose 只是几何估计
+  + sample_grasp_pose 没有真正抓取规划
+  + IK 只有目标求解，没有完整轨迹规划
