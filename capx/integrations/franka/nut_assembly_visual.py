@@ -1,4 +1,3 @@
-import pathlib
 import time
 from typing import Any
 
@@ -19,7 +18,6 @@ from capx.utils.camera_utils import obs_get_rgb
 from capx.utils.depth_utils import (
     deproject_pixel_to_camera,
     depth_to_pointcloud,
-    depth_to_rgb,
 )
 
 
@@ -126,31 +124,12 @@ class FrankaControlNutAssemblyVisualApi(ApiBase):
                 f"SAM3 mask shape {mask_bool.shape} does not match depth shape {depth.shape}"
             )
 
+        # SAM3 masks are consumed in memory by the pose/deprojection pipeline.
+        # Do not persist diagnostic images here: this API is called repeatedly
+        # during evaluation (especially Nut Assembly), and writing overlays to
+        # the process working directory creates surprising test artifacts.
         if self._env.viser_debug:
-            depth_img = depth_to_rgb(depth)
-            Image.fromarray(depth_img).save("depth_image.jpg")
-
-            mask_overlay = rgb.copy()
-            mask_overlay[mask_bool] = np.array([255, 0, 0], dtype=np.uint8)
-            overlay_img = Image.fromarray(mask_overlay)
-            draw = ImageDraw.Draw(overlay_img)
-            radius = 6
-            draw.ellipse(
-                [
-                    point_px[0] - radius,
-                    point_px[1] - radius,
-                    point_px[0] + radius,
-                    point_px[1] + radius,
-                ],
-                outline=(255, 255, 0),
-                width=2,
-            )
-            overlay_path = pathlib.Path(f"{object_name.replace(' ', '_')}_sam3_overlay.jpg")
-            overlay_img.save(overlay_path)
             print(f"SAM3 mask scores for {object_name}: {sam_scores}")
-
-            mask_binary_path = pathlib.Path(f"{object_name.replace(' ', '_')}_sam3_mask.png")
-            Image.fromarray(mask_bool.astype(np.uint8) * 255).save(mask_binary_path)
 
         self._log_step("Nut 3D Pose", f"Deprojecting SAM3 mask for '{object_name}' ...")
 
