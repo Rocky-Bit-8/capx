@@ -1,5 +1,6 @@
 from .base_api import list_apis, register_api
 from .franka.control import FrankaControlApi
+from .franka.control_molmo import FrankaControlMolmoApi
 from .franka.cube_safety import FrankaCubeSafetyApi
 from .franka.control_privileged import FrankaControlPrivilegedApi
 from .franka.control_reduced import FrankaControlApiReduced
@@ -7,6 +8,7 @@ from .franka.control_reduced_skill_library import FrankaControlApiReducedSkillLi
 from .franka.control_reduced_exampleless import FrankaControlApiReducedExampleless
 from .franka.nut_assembly_privileged import FrankaControlNutAssemblyPrivilegedApi
 from .franka.nut_assembly_visual import FrankaControlNutAssemblyVisualApi
+from .franka.nut_assembly_molmo import FrankaControlNutAssemblyMolmoApi
 from .franka.spill_wipe import FrankaControlSpillWipeApi, FrankaControlSpillWipeTableApi
 from .franka.spill_wipe_privileged import FrankaControlSpillWipePrivilegedApi
 from .franka.handover_privileged import FrankaHandoverPrivilegedApi
@@ -28,6 +30,7 @@ except ImportError:
 
 register_api("FrankaControlPrivilegedApi", FrankaControlPrivilegedApi)
 register_api("FrankaControlApi", lambda env: FrankaControlApi(env, use_sam3=True))
+register_api("FrankaControlMolmoApi", lambda env: FrankaControlMolmoApi(env, use_sam3=True))
 register_api("FrankaCubeSafetyApi", lambda env: FrankaCubeSafetyApi(env, use_sam3=True))
 register_api("FrankaControlApiReduced", FrankaControlApiReduced)
 register_api(
@@ -106,6 +109,7 @@ register_api(
 
 register_api("FrankaControlNutAssemblyPrivilegedApi", FrankaControlNutAssemblyPrivilegedApi)
 register_api("FrankaControlNutAssemblyVisualApi", FrankaControlNutAssemblyVisualApi)
+register_api("FrankaControlNutAssemblyMolmoApi", FrankaControlNutAssemblyMolmoApi)
 register_api(
     "FrankaControlNutAssemblyApiReduced",
     lambda env: FrankaControlApiReduced(env, is_peg_assembly=True),

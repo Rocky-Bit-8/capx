@@ -6,6 +6,7 @@ MODEL="$ROOT/capx/molmo/allenai--Molmo2-8B/e28fa28597e5ec5e0cca2201dd8ab33d48bc4
 VENV="$ROOT/molmo-venv"
 LOG="$ROOT/molmo-vllm.log"
 PIDFILE="$ROOT/molmo-vllm.pid"
+export PATH="$VENV/bin:$PATH"
 
 if [[ ! -f "$MODEL/config.json" ]]; then
   echo "Molmo model is missing: $MODEL" >&2
@@ -29,7 +30,8 @@ nohup "$VENV/bin/python" -m vllm.entrypoints.openai.api_server \
   --served-model-name allenai/Molmo2-8B \
   --host 0.0.0.0 --port 8122 \
   --dtype bfloat16 --gpu-memory-utilization 0.45 \
-  --max-model-len 4096 --trust-remote-code \
+  --max-model-len 4096 --max-num-batched-tokens 4096 \
+  --trust-remote-code \
   >"$LOG" 2>&1 < /dev/null &
 echo $! > "$PIDFILE"
 echo "Started Molmo vLLM (PID $!), log: $LOG"

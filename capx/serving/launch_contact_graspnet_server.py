@@ -235,29 +235,15 @@ def _do_plan(req: PlanRequest) -> PlanResponse:
 
         current_retries += 1
 
-    if current_retries >= max_retries:
-        grasps_out = np.array([])
-        scores_out = np.array([])
-        contact_pts_out = np.array([])
-    else:
-        grasps_result = pred_grasps_cam[segmap_id]
-        scores_result = scores[segmap_id]
-        contact_pts_result = contact_pts[segmap_id]
-
-        if isinstance(grasps_result, list):
-            grasps_out = np.array(grasps_result)
-        else:
-            grasps_out = grasps_result
-
-        if isinstance(scores_result, list):
-            scores_out = np.array(scores_result)
-        else:
-            scores_out = scores_result
-
-        if isinstance(contact_pts_result, list):
-            contact_pts_out = np.array(contact_pts_result)
-        else:
-            contact_pts_out = contact_pts_result
+    # Return the latest result regardless of whether the retry budget was
+    # exhausted.  This preserves initial results when max_retries == 0 and
+    # candidates found on the final retry.
+    grasps_result = pred_grasps_cam.get(segmap_id, [])
+    scores_result = scores.get(segmap_id, [])
+    contact_pts_result = contact_pts.get(segmap_id, [])
+    grasps_out = np.asarray(grasps_result)
+    scores_out = np.asarray(scores_result)
+    contact_pts_out = np.asarray(contact_pts_result)
 
     return PlanResponse(
         grasps_base64=_numpy_to_base64(grasps_out),
@@ -345,24 +331,10 @@ def _do_plan_point_clouds(req: PlanPointCloudsRequest) -> PlanResponse:
 
         current_retries += 1
 
-    if current_retries >= max_retries:
-        grasps_out = np.array([])
-        scores_out = np.array([])
-        contact_pts_out = np.array([])
-    else:
-        grasps_result = pred_grasps_cam[segmap_id]
-        scores_result = scores[segmap_id]
-        contact_pts_result = contact_pts[segmap_id]
-
-        grasps_out = np.array(grasps_result) if isinstance(grasps_result, list) else grasps_result
-        scores_out = (
-            np.array(scores_result) if isinstance(scores_result, list) else scores_result
-        )
-        contact_pts_out = (
-            np.array(contact_pts_result)
-            if isinstance(contact_pts_result, list)
-            else contact_pts_result
-        )
+    # Keep candidates from the initial inference or the final retry.
+    grasps_out = np.asarray(pred_grasps_cam.get(segmap_id, []))
+    scores_out = np.asarray(scores.get(segmap_id, []))
+    contact_pts_out = np.asarray(contact_pts.get(segmap_id, []))
 
     return PlanResponse(
         grasps_base64=_numpy_to_base64(grasps_out),
