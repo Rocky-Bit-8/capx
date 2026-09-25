@@ -1,5 +1,3 @@
-import os
-import pathlib
 import time
 from typing import Any
 
@@ -7,20 +5,19 @@ import numpy as np
 import open3d as o3d
 import viser.transforms as vtf
 from PIL import Image, ImageDraw
+from scipy import ndimage
 from scipy.spatial.transform import Rotation as SciRotation
 
 from capx.envs.base import (
     BaseEnv,
 )
 from capx.integrations.base_api import ApiBase
-from capx.integrations.vision.molmo import init_molmo
 from capx.integrations.motion.pyroki import init_pyroki_remote
-from capx.integrations.vision.sam3 import init_sam3_point_prompt
+from capx.integrations.vision.sam3 import init_sam3
 from capx.utils.camera_utils import obs_get_rgb
 from capx.utils.depth_utils import (
     deproject_pixel_to_camera,
     depth_to_pointcloud,
-    depth_to_rgb,
 )
 
 
@@ -38,6 +35,17 @@ class FrankaControlNutAssemblyVisualApi(ApiBase):
     """
 
     _TCP_OFFSET = np.array([0.0, 0.0, -0.107], dtype=np.float64)
+    _SAM3_PROMPT_FALLBACKS = {
+        "extruded handle of the brown square nut": (
+            "brown square nut handle",
+            "handle",
+        ),
+        "white hollow center of the brown square nut": (
+            "white center hole",
+            "center hole",
+            "brown square nut",
+        ),
+    }
 
     def __init__(self, env: BaseEnv) -> None:
         super().__init__(env)
@@ -46,72 +54,15 @@ class FrankaControlNutAssemblyVisualApi(ApiBase):
         # from capx.integrations.motion.pyroki_context import get_pyroki_context  # type: ignore
         # self._TCP_OFFSET = _TCP_OFFSET
         # ctx = get_pyroki_context("panda_description", target_link_name="panda_hand")
-        self.molmo_point_fn = init_molmo()
-        # self.sam2_point_prompt_fn = init_sam2_point_prompt()
-        self.sam3_point_prompt_fn = init_sam3_point_prompt()
+        # Nut Assembly uses SAM3's text segmentation directly.  This avoids a
+        # separate Molmo GPU service merely to obtain a point prompt.
+        self.sam3_segment_fn = init_sam3()
         # self._robot = ctx.robot
         # self._target_link_name = ctx.target_link_name
         # self._pks = pks
-        # Nut Assembly configs launch the PyRoKI HTTP service alongside the
-        # simulator. Bind explicitly to that backend; init_pyroki() cannot
-        # infer a backend during API construction because it has no env arg.
-        self.ik_solve_fn = init_pyroki_remote(
-            os.environ.get("PYROKI_SERVICE_URL", "http://127.0.0.1:8116")
-        )
+        self.ik_solve_fn = init_pyroki_remote()
         self.cfg: np.ndarray | None = None
         self.camera_name = "robot0_robotview"
-        # Diagnostics are opt-in and never participate in control decisions.
-        self._verify_dir: pathlib.Path | None = None
-        self._verify_image_index = 0
-
-    def set_verify_output_dir(self, output_dir: str | os.PathLike[str] | None) -> None:
-        """Set the directory for optional SAM/Molmo/IK verification artifacts."""
-        self._verify_dir = pathlib.Path(output_dir) if output_dir else None
-        if self._verify_dir is not None:
-            self._verify_dir.mkdir(parents=True, exist_ok=True)
-
-    def _verify_path(self) -> pathlib.Path:
-        if self._verify_dir is None:
-            self._verify_dir = pathlib.Path("/home/rocky/Code/cap-x-main/bin/verify")
-            self._verify_dir.mkdir(parents=True, exist_ok=True)
-        return self._verify_dir
-
-    def _save_verify_image(self, image: Image.Image, stem: str) -> None:
-        try:
-            path = self._verify_path() / f"{self._verify_image_index:04d}_{stem}.png"
-            image.save(path)
-            self._verify_image_index += 1
-        except Exception as exc:  # diagnostics must never affect control
-            print(f"[verify] Could not save image: {exc}")
-
-    def _record_ik_vector(self, target: np.ndarray, actual: np.ndarray | None) -> None:
-        if actual is None:
-            return
-        try:
-            path = self._verify_path() / "goto_pose_vectors.csv"
-            if not path.exists():
-                path.write_text("target_x,target_y,target_z,actual_x,actual_y,actual_z\n")
-            with path.open("a") as f:
-                values = np.concatenate([np.asarray(target).reshape(3), np.asarray(actual).reshape(3)])
-                f.write(",".join(f"{float(v):.9f}" for v in values) + "\n")
-        except Exception as exc:
-            print(f"[verify] Could not record IK vector: {exc}")
-
-    def _sim_ee_position(self) -> np.ndarray | None:
-        try:
-            env = self._env
-            sim = getattr(getattr(env, "robosuite_env", None), "sim", None)
-            if sim is None:
-                sim = getattr(getattr(env, "handle", None), "env", None)
-                sim = getattr(sim, "sim", None) if sim is not None else None
-            if sim is None:
-                sim = getattr(env, "sim", None)
-            body_id = getattr(env, "gripper_link_idx", None)
-            if sim is None or body_id is None:
-                return None
-            return np.asarray(sim.data.xpos[body_id], dtype=np.float64).copy()
-        except Exception:
-            return None
 
     def functions(self) -> dict[str, Any]:
         return {
@@ -126,7 +77,10 @@ class FrankaControlNutAssemblyVisualApi(ApiBase):
     def get_object_pose(self, object_name: str) -> tuple[np.ndarray, np.ndarray]:
         """Get the pose of an object in the environment from a natural language description.
         The quaternion from get_object_pose may be unreliable, so disregard it and use the grasp pose quaternion OR (0, 0, 1, 0) wxyz as the gripper down orientation if using this for placement position.
-        It is possible that get_object_pose is sometimes be unreliable and return None for both position and quaternion.
+        Raises:
+            RuntimeError: If SAM3 cannot provide a valid point for the
+                requested object.  Continuing with a ``None`` pose makes the
+                generated task code fail later with an unrelated NumPy error.
 
         Args:
             object_name: The name of the object to get the pose of.
@@ -137,6 +91,10 @@ class FrankaControlNutAssemblyVisualApi(ApiBase):
         """
 
         # deproject the point to the world coordinate, use oriented bounding box to get the rotation, and return the position of the point and the rotation of the oriented bounding box
+        self._log_step(
+            "Nut Pose Query",
+            f"Capturing camera observation for '{object_name}' ...",
+        )
         start_time = time.time()
         obs = self._env.get_observation()
         print(f"get observation in {time.time() - start_time} seconds")
@@ -150,10 +108,15 @@ class FrankaControlNutAssemblyVisualApi(ApiBase):
 
         rgb = list(rgb_imgs.values())[0]
         pil_rgb = Image.fromarray(rgb).convert("RGB")
+        self._log_step_update(images=rgb)
 
         mask_bool, point_px, sam_scores = self._segment_object_from_language(pil_rgb, object_name)
         if point_px is None:
-            return None, None
+            self._log_step_update(text="SAM3 did not return a usable object mask.")
+            raise RuntimeError(
+                f"SAM3 could not segment '{object_name}' in the Nut Assembly camera image, "
+                "including its Nut-specific fallback prompts."
+            )
 
         depth = obs[self.camera_name]["images"]["depth"][:, :, 0]
         if mask_bool.shape != depth.shape:
@@ -161,49 +124,20 @@ class FrankaControlNutAssemblyVisualApi(ApiBase):
                 f"SAM3 mask shape {mask_bool.shape} does not match depth shape {depth.shape}"
             )
 
+        # SAM3 masks are consumed in memory by the pose/deprojection pipeline.
+        # Do not persist diagnostic images here: this API is called repeatedly
+        # during evaluation (especially Nut Assembly), and writing overlays to
+        # the process working directory creates surprising test artifacts.
         if self._env.viser_debug:
-            depth_img = depth_to_rgb(depth)
-            Image.fromarray(depth_img).save("depth_image.jpg")
+            print(f"SAM3 mask scores for {object_name}: {sam_scores}")
 
-            mask_overlay = rgb.copy()
-            mask_overlay[mask_bool] = np.array([255, 0, 0], dtype=np.uint8)
-            overlay_img = Image.fromarray(mask_overlay)
-            draw = ImageDraw.Draw(overlay_img)
-            radius = 6
-            draw.ellipse(
-                [
-                    point_px[0] - radius,
-                    point_px[1] - radius,
-                    point_px[0] + radius,
-                    point_px[1] + radius,
-                ],
-                outline=(255, 255, 0),
-                width=2,
-            )
-            overlay_path = pathlib.Path(f"{object_name.replace(' ', '_')}_sam3_overlay.jpg")
-            overlay_img.save(overlay_path)
-            print(f"SAM2 mask scores for {object_name}: {sam_scores}")
+        self._log_step("Nut 3D Pose", f"Deprojecting SAM3 mask for '{object_name}' ...")
 
-            mask_binary_path = pathlib.Path(f"{object_name.replace(' ', '_')}_sam3_mask.png")
-            Image.fromarray(mask_bool.astype(np.uint8) * 255).save(mask_binary_path)
-
-        # Always retain verification artifacts, independent of viser_debug.
-        mask_img = Image.fromarray((mask_bool.astype(np.uint8) * 255), mode="L").convert("RGB")
-        self._save_verify_image(mask_img, f"sam3_mask_{object_name.replace(' ', '_')}")
-        overlay = Image.fromarray(rgb.copy())
-        overlay_arr = np.asarray(overlay).copy()
-        overlay_arr[mask_bool] = (0.55 * overlay_arr[mask_bool] + 0.45 * np.array([255, 0, 0])).astype(np.uint8)
-        overlay = Image.fromarray(overlay_arr)
-        ImageDraw.Draw(overlay).ellipse(
-            [point_px[0] - 6, point_px[1] - 6, point_px[0] + 6, point_px[1] + 6],
-            outline=(255, 255, 0), width=2,
-        )
-        self._save_verify_image(overlay, f"molmo_point_{object_name.replace(' ', '_')}")
-
-        mask_idxs = np.where(mask_bool.flatten())
-        points = depth_to_pointcloud(depth, obs[self.camera_name]["intrinsics"])[mask_idxs]
-
-        median_depth = np.min(depth[mask_bool])
+        # A SAM mask can include a few table pixels at its edge.  The former
+        # minimum-depth rule made one such pixel move the 3D target by cm.
+        # Estimate depth from valid mask pixels nearest the selected semantic
+        # point instead, which also works when the point is the center hole.
+        median_depth = self._robust_mask_depth(depth, mask_bool, point_px)
         camera_point = deproject_pixel_to_camera(
             point_px, median_depth, obs[self.camera_name]["intrinsics"]
         )
@@ -216,6 +150,10 @@ class FrankaControlNutAssemblyVisualApi(ApiBase):
             @ camera_tf
         )
 
+        valid_mask = mask_bool & np.isfinite(depth) & (depth > 0.015) & (depth < 20.0)
+        points = depth_to_pointcloud(
+            depth, obs[self.camera_name]["intrinsics"], filter_invalid=False
+        )[valid_mask.ravel()]
         o3d_points = o3d.geometry.PointCloud()
         o3d_points.points = o3d.utility.Vector3dVector(points)
 
@@ -256,13 +194,20 @@ class FrankaControlNutAssemblyVisualApi(ApiBase):
             )
 
             self._env.viser_server.scene.add_frame(
-                f"molmo_point_{object_name}",
+                f"sam3_point_{object_name}",
                 position=world_point.wxyz_xyz[-3:],
                 wxyz=fixed_rotation,
                 axes_length=0.05,
                 axes_radius=0.005,
             )
         print(f"get_object_pose in {time.time() - start_time} seconds")
+        self._log_step_update(
+            text=(
+                "Pose estimated at "
+                f"[{world_point.wxyz_xyz[-3]:.3f}, {world_point.wxyz_xyz[-2]:.3f}, "
+                f"{world_point.wxyz_xyz[-1]:.3f}] m."
+            )
+        )
         return world_point.wxyz_xyz[-3:], fixed_rotation
 
     def sample_grasp_pose(self, object_name: str) -> tuple[np.ndarray, np.ndarray]:
@@ -276,7 +221,7 @@ class FrankaControlNutAssemblyVisualApi(ApiBase):
             position: (3,) XYZ in meters.
             quaternion_wxyz: (4,) WXYZ unit quaternion.
         """
-        # simplified the solution to use oriented bounding box + molmo
+        # Reuse the SAM3-derived object pose as the grasp pose.
         return self.get_object_pose(object_name)
 
     # def goto_pose(
@@ -339,9 +284,18 @@ class FrankaControlNutAssemblyVisualApi(ApiBase):
         Returns:
             None
         """
+        if position is None or quaternion_wxyz is None:
+            raise RuntimeError(
+                "Cannot move to a perception result without a valid pose. "
+                "Ensure the Nut Assembly SAM3 service on port 8114 is running, then query the object again."
+            )
 
         pos = np.asarray(position, dtype=np.float64).reshape(3)
         quat_wxyz = np.asarray(quaternion_wxyz, dtype=np.float64).reshape(4)
+        self._log_step(
+            "Nut IK Motion",
+            f"Solving IK for [{pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f}] m ...",
+        )
         # Align with legacy env: apply TCP offset in end-effector frame
         quat_xyzw = np.array(
             [quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]], dtype=np.float64
@@ -366,7 +320,7 @@ class FrankaControlNutAssemblyVisualApi(ApiBase):
             joints_z_offset = np.asarray(self.cfg[:-1], dtype=np.float64).reshape(7)
 
             self._env.move_to_joints_blocking(joints_z_offset)
-            self._record_ik_vector(z_offset_pos, self._sim_ee_position())
+            self._log_step_update(text="Approach pose reached; solving final target ...")
 
         if self.cfg is None:
             self.cfg = self.ik_solve_fn(
@@ -379,7 +333,7 @@ class FrankaControlNutAssemblyVisualApi(ApiBase):
             )
         joints = np.asarray(self.cfg[:-1], dtype=np.float64).reshape(7)
         self._env.move_to_joints_blocking(joints)
-        self._record_ik_vector(offset_pos, self._sim_ee_position())
+        self._log_step_update(text="Target pose reached.")
 
     def open_gripper(self) -> None:
         """Open gripper fully.
@@ -387,9 +341,11 @@ class FrankaControlNutAssemblyVisualApi(ApiBase):
         Args:
             None
         """
+        self._log_step("open_gripper", "Opening gripper ...")
         self._env._set_gripper(1.0)
         for _ in range(40):
             self._env._step_once()
+        self._log_step_update(text="Gripper opened.")
 
     def close_gripper(self) -> None:
         """Close gripper fully.
@@ -397,18 +353,22 @@ class FrankaControlNutAssemblyVisualApi(ApiBase):
         Args:
             None
         """
+        self._log_step("close_gripper", "Closing gripper ...")
         self._env._set_gripper(0.0)
         for _ in range(60):
             self._env._step_once()
+        self._log_step_update(text="Gripper closed.")
 
     def goto_home_joint_position(self) -> None:
         """Return the arm to its reset joint configuration with high manipulability"""
+        self._log_step("goto_home_joint_position", "Returning arm to home joint configuration ...")
         home = getattr(self._env, "home_joint_position", None)
         if home is None:
             raise RuntimeError("Home joint position is unavailable in the current environment.")
         joints = np.asarray(home, dtype=np.float64).reshape(7)
         self._env.move_to_joints_blocking(joints)
         self.cfg = None
+        self._log_step_update(text="Home configuration reached.")
 
     def _solve_ik_with_seed(
         self, target_position: np.ndarray, target_quat: np.ndarray, seed: np.ndarray | None
@@ -426,30 +386,145 @@ class FrankaControlNutAssemblyVisualApi(ApiBase):
     def _segment_object_from_language(
         self, image: Image.Image, object_name: str
     ) -> tuple[np.ndarray, tuple[int, int], list[float]]:
-        """Use Molmo + SAM2 to return a binary mask for a language-described object."""
-        dets = self.molmo_point_fn(image, objects=[object_name])
-        point = dets.get(object_name)
-        if point is None or any(coord is None for coord in point):
-            # raise ValueError(f"Molmo did not return a point for '{object_name}'")
+        """Return a Nut-specific SAM3 mask and a semantically useful pixel."""
+        prompts = (object_name, *self._SAM3_PROMPT_FALLBACKS.get(object_name.lower(), ()))
+        self._log_step("SAM3 Segmentation", f"Segmenting '{object_name}' with SAM3 ...", images=image)
+        results = []
+        selected_prompt = object_name
+        for prompt in prompts:
+            results = self.sam3_segment_fn(image, prompt)
+            if results:
+                selected_prompt = prompt
+                break
+        if not results:
+            self._log_step_update(text="No masks returned for the requested object.")
             return None, None, None
-        point_coords = (float(point[0]), float(point[1]))
-        # scores, masks = self.sam2_point_prompt_fn(image, point_coords=point_coords)
-        results = self.sam3_point_prompt_fn(image, point_coords)
-        point_xy = (int(round(point_coords[0])), int(round(point_coords[1])))
-        scores = [result["score"] for result in results]
-        masks = [result["mask"] for result in results]
-        mask_bool = np.asarray(results[np.argmax(scores)]["mask"]).astype(bool)
-        if len(masks) == 0:
-            raise ValueError(f"SAM3 returned no masks for '{object_name}'")
+        if selected_prompt != object_name:
+            print(f"SAM3 prompt fallback: '{object_name}' -> '{selected_prompt}'")
 
-        best_mask = np.asarray(masks[0])
-        best_mask = np.squeeze(best_mask)
-        if best_mask.ndim != 2:
-            raise ValueError(f"SAM3 mask must be 2D, got shape {best_mask.shape}")
+        is_nut_part = "square nut" in object_name.lower() or "hollow center" in object_name.lower()
+        nut_mask, hole_mask = self._select_square_nut_mask(results) if is_nut_part else (None, None)
+        if is_nut_part and nut_mask is None:
+            # Part-level language grounding frequently returns the entire nut,
+            # but not consistently.  Ask for the stable outer object and use
+            # its ring geometry rather than treating a hole as an object.
+            outer_results = self.sam3_segment_fn(image, "brown square nut")
+            nut_mask, hole_mask = self._select_square_nut_mask(outer_results)
+            if nut_mask is not None:
+                results = outer_results
+                selected_prompt = "brown square nut"
+                print(f"SAM3 geometric fallback: '{object_name}' -> '{selected_prompt}'")
 
-        mask_bool = best_mask.astype(bool)
-        point_xy = (int(round(point_coords[0])), int(round(point_coords[1])))
+        if nut_mask is not None:
+            mask_bool = nut_mask
+            if "handle" in object_name.lower():
+                point_xy = self._handle_grasp_pixel(mask_bool, hole_mask)
+            elif "hollow center" in object_name.lower() or "center hole" in object_name.lower():
+                point_xy = self._mask_center_pixel(hole_mask)
+            else:
+                point_xy = self._mask_center_pixel(mask_bool)
+        else:
+            mask_bool = self._as_mask(results[0]["mask"])
+            if mask_bool is None:
+                return None, None, None
+            point_xy = self._mask_center_pixel(mask_bool)
+
+        scores = [float(result["score"]) for result in results]
+        if self._webui_enabled:
+            overlay = np.asarray(image).copy()
+            overlay[mask_bool] = np.array([255, 0, 0], dtype=np.uint8)
+            self._log_step_update(
+                text=f"Returned {len(results)} mask(s), best score: {scores[0]:.3f}.",
+                images=overlay,
+            )
+        else:
+            self._log_step_update(text=f"Returned {len(results)} mask(s), best score: {scores[0]:.3f}.")
         return mask_bool, point_xy, scores
+
+    @staticmethod
+    def _as_mask(mask: Any) -> np.ndarray | None:
+        mask_bool = np.squeeze(np.asarray(mask)).astype(bool)
+        if mask_bool.ndim != 2 or not np.any(mask_bool):
+            return None
+        return mask_bool
+
+    @classmethod
+    def _select_square_nut_mask(
+        cls, results: list[dict[str, Any]]
+    ) -> tuple[np.ndarray | None, np.ndarray | None]:
+        """Find the compact ring-shaped square-nut proposal among SAM3 masks."""
+        best: tuple[float, np.ndarray, np.ndarray] | None = None
+        for result in results:
+            mask = cls._as_mask(result.get("mask"))
+            if mask is None:
+                continue
+            ys, xs = np.nonzero(mask)
+            height, width = ys.ptp() + 1, xs.ptp() + 1
+            if mask.sum() < 400 or min(height, width) < 25 or max(height, width) > 130:
+                continue
+            filled = ndimage.binary_fill_holes(mask)
+            holes, count = ndimage.label(filled & ~mask)
+            if count == 0:
+                continue
+            sizes = np.bincount(holes.ravel())
+            sizes[0] = 0
+            hole = holes == int(np.argmax(sizes))
+            hole_area = int(hole.sum())
+            if hole_area < 60 or hole_area > int(mask.sum() * 0.7):
+                continue
+            aspect = max(height, width) / min(height, width)
+            # The score is only a tie-breaker.  A compact ring with a sizeable
+            # enclosed hole is the task-specific identity cue for this nut.
+            geometry_score = 3.0 - abs(aspect - 1.0) + min(hole_area / mask.sum(), 0.35)
+            score = geometry_score + 0.05 * float(result.get("score", 0.0))
+            if best is None or score > best[0]:
+                best = (score, mask, hole)
+        return (best[1], best[2]) if best is not None else (None, None)
+
+    @staticmethod
+    def _mask_center_pixel(mask: np.ndarray) -> tuple[int, int]:
+        pixels = np.argwhere(mask)
+        if pixels.size == 0:
+            raise ValueError("Cannot choose a pixel from an empty mask")
+        center_yx = np.median(pixels, axis=0)
+        point_yx = pixels[np.argmin(np.sum((pixels - center_yx) ** 2, axis=1))]
+        return int(point_yx[1]), int(point_yx[0])
+
+    @classmethod
+    def _handle_grasp_pixel(cls, nut_mask: np.ndarray, hole_mask: np.ndarray) -> tuple[int, int]:
+        """Place the grasp point inside the protruding handle, not nut center."""
+        hole_pixels = np.argwhere(hole_mask)
+        if hole_pixels.size == 0:
+            return cls._mask_center_pixel(nut_mask)
+        hole_center = np.median(hole_pixels, axis=0)
+        nut_pixels = np.argwhere(nut_mask)
+        offsets = nut_pixels - hole_center
+        distances = np.linalg.norm(offsets, axis=1)
+        direction = offsets[np.argmax(distances)]
+        direction_norm = np.linalg.norm(direction)
+        if direction_norm < 1e-6:
+            return cls._mask_center_pixel(nut_mask)
+        direction /= direction_norm
+        projections = offsets @ direction
+        # 72% lies inside the handle rather than on its fragile outer edge.
+        target_projection = 0.72 * float(np.max(projections))
+        lateral = np.abs(offsets[:, 0] * direction[1] - offsets[:, 1] * direction[0])
+        cost = (projections - target_projection) ** 2 + 2.0 * lateral**2
+        point_yx = nut_pixels[np.argmin(cost)]
+        return int(point_yx[1]), int(point_yx[0])
+
+    @staticmethod
+    def _robust_mask_depth(
+        depth: np.ndarray, mask: np.ndarray, point_xy: tuple[int, int]) -> float:
+        valid = mask & np.isfinite(depth) & (depth > 0.015) & (depth < 20.0)
+        pixels = np.argwhere(valid)
+        if pixels.size == 0:
+            raise RuntimeError("SAM3 mask contains no valid depth pixels")
+        point_yx = np.array([point_xy[1], point_xy[0]])
+        distances = np.sum((pixels - point_yx) ** 2, axis=1)
+        nearby = pixels[np.argsort(distances)[: min(96, len(pixels))]]
+        values = depth[nearby[:, 0], nearby[:, 1]]
+        return float(np.median(values))
 
     @staticmethod
     def _extract_arm_joints(cfg: np.ndarray) -> np.ndarray:

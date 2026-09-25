@@ -9,9 +9,10 @@ GPU: NVIDIA RTX 6000D（sm120，约 89 GiB）
 远程 Molmo API: 127.0.0.1:8122
 ```
 
-Nut Assembly 的 3D 链路仍由 SAM3、深度反投影和 PyRoKi 完成；Molmo 只为
-`extruded handle of the brown square nut` 提供二维语义点，并限制在 SAM3 mask
-内，失败时自动回退到原几何点。
+Nut Assembly 的 3D 链路仍由 SAM3、深度反投影和 PyRoKi 完成；
+`FrankaControlNutAssemblyVisualApi` 内置 Molmo 调用，为
+`extruded handle of the brown square nut` 提供二维语义点，再交给 SAM3；失败时
+自动回退到原有行为。VDM 配置直接使用这个 Visual API，不需要独立的 Molmo API。
 
 ## 1. 启动远程 Molmo
 
@@ -95,12 +96,12 @@ MPLCONFIGDIR=/tmp/capx-mpl \
 ROBOT_DESCRIPTIONS_CACHE=/tmp/capx-robot-cache \
 MUJOCO_GL=egl \
 ./.setup-venv/bin/python -m capx.envs.launch \
-  --config-path /home/rocky/Code/cap-x-main/env_configs/nut_assembly/franka_robosuite_nut_assembly_multiturn_molmo.yaml \
+  --config-path /home/rocky/Code/cap-x-main/env_configs/nut_assembly/franka_robosuite_nut_assembly_multiturn_vdm.yaml \
   --num-workers 1 --total-trials 1 --record-video True
 ```
 
-该配置启动本地 SAM3（8114）和 PyRoKi（8116），并通过隧道调用远程 Molmo
-（8122）。首次运行建议使用 `--num-workers 1 --total-trials 1` 做冒烟测试，确认
+该配置启动本地 SAM3（8114）和 PyRoKi（8116）；Visual API 明确通过
+`http://127.0.0.1:8116` 调用 PyRoKi，并通过隧道调用远程 Molmo（8122）。首次运行建议使用 `--num-workers 1 --total-trials 1` 做冒烟测试，确认
 链路正常后再提高并发和试验数。
 
 ## 4. 常见问题

@@ -17,7 +17,9 @@ _PROC: Any | None = None  # kept for backward compatibility; unused with vLLM HT
 _MODEL: Any | None = None  # kept for backward compatibility; unused with vLLM HTTP API
 
 # SERVICE_URL = "https://openrouter.ai/api/" # OpenRouter
-SERVICE_URL = "http://127.0.0.1:8122/v1"  # local
+# The default is the local end of the SSH tunnel to the remote vLLM server.
+# Allow callers/configurations to override it without editing source code.
+SERVICE_URL = os.environ.get("MOLMO_SERVICE_URL", "http://127.0.0.1:8122/v1")
 
 
 

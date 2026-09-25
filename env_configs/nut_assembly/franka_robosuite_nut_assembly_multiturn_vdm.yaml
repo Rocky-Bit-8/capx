@@ -1,3 +1,9 @@
+# Molmo is already part of FrankaControlNutAssemblyVisualApi. Start the remote
+# vLLM server and keep this SSH tunnel open before launching this configuration:
+#   ssh -p 19154 root@connect.weste.seetacloud.com '/root/autodl-tmp/start_molmo_vllm.sh'
+#   ssh -N -o ExitOnForwardFailure=yes -L 8122:127.0.0.1:8122 -p 19154 root@connect.weste.seetacloud.com
+#   curl -fsS http://127.0.0.1:8122/v1/models
+# The remote RTX 6000D launch script must export VLLM_USE_FLASHINFER_SAMPLER=0.
 # Usage: uv run capx/envs/launch.py --config-path env_configs/nut_assembly/franka_robosuite_nut_assembly_multiturn_vdm.yaml
 
 env:

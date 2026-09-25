@@ -676,6 +676,13 @@ def _run_single_trial(
 
     # --- 1. Reset environment ---
     obs, _ = env.reset(options={"trial": trial}, seed=trial)
+    # Route optional Nut Assembly verification artifacts into this trial's
+    # result tree. APIs that do not implement this hook are unaffected.
+    verify_dir = os.path.join(config["output_dir"], "verify", f"trial_{trial:02d}")
+    for api in getattr(env, "_apis", {}).values():
+        setter = getattr(api, "set_verify_output_dir", None)
+        if callable(setter):
+            setter(verify_dir)
     # Reset the SIGALRM timer AFTER env.reset() so the timeout only covers
     # actual task execution, not scene loading / cuRobo JIT compilation.
     import signal
