@@ -1,5 +1,6 @@
 # Molmo is already part of FrankaControlNutAssemblyVisualApi. Start the remote
-# vLLM server and keep this SSH tunnel open before launching this configuration:
+# vLLM server and keep this SSH tunnel open before launching this configuration.
+# PyRoKI is local to the MuJoCo environment; do not start a remote IK service:
 #   ssh -p 19154 root@connect.weste.seetacloud.com '/root/autodl-tmp/start_molmo_vllm.sh'
 #   ssh -N -o ExitOnForwardFailure=yes -L 8122:127.0.0.1:8122 -p 19154 root@connect.weste.seetacloud.com
 #   curl -fsS http://127.0.0.1:8122/v1/models
@@ -44,13 +45,6 @@ env:
       - The word 'FINISH' if the task appears to be complete
 
 api_servers:
-  - _target_: capx.serving.launch_pyroki_server.main
-    port: 8116
-    host: 127.0.0.1
-    robot: panda_description
-    target_link: panda_hand
-
-
   - _target_: capx.serving.launch_sam3_server.main
     device: cuda
     port: 8114

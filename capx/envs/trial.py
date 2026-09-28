@@ -18,6 +18,8 @@ import gc
 import io
 import json
 import os
+import pathlib
+import shutil
 import time
 from typing import Any
 
@@ -42,6 +44,7 @@ from capx.utils.launch_utils import (
     _get_visual_feedback,
     _parse_multi_turn_decision,
     _save_trial_artifacts,
+    trial_artifact_dir,
     collapse_text_image_inputs,
 )
 from capx.utils.video_utils import _encode_video_base64, _write_video
@@ -117,11 +120,9 @@ def _trial_video_dir(
     reward: float,
 ) -> str:
     """Return the trial output directory path used for video saving."""
-    return os.path.join(
-        config["output_dir"],
-        f"trial_{trial:02d}_sandboxrc_{info_step['sandbox_rc']}_reward_{reward:.3f}"
-        f"_taskcompleted_{int(info_step.get('task_completed', False))}",
-    )
+    return str(trial_artifact_dir(
+        config, trial, info_step["sandbox_rc"], reward, info_step.get("task_completed", False)
+    ))
 
 
 def _save_trial_video(
@@ -678,7 +679,7 @@ def _run_single_trial(
     obs, _ = env.reset(options={"trial": trial}, seed=trial)
     # Route optional Nut Assembly verification artifacts into this trial's
     # result tree. APIs that do not implement this hook are unaffected.
-    verify_dir = os.path.join(config["output_dir"], "verify", f"trial_{trial:02d}")
+    verify_dir = os.path.join(config["output_dir"], ".verify_staging", f"trial_{trial:02d}")
     for api in getattr(env, "_apis", {}).values():
         setter = getattr(api, "set_verify_output_dir", None)
         if callable(setter):
@@ -950,6 +951,14 @@ def _run_single_trial(
         ensemble_data=ensemble_data,
         multiturn_ensemble_data=multiturn_ensemble_data,
     )
+
+    if code_path:
+        staged_verify = pathlib.Path(verify_dir)
+        if staged_verify.exists():
+            final_verify = pathlib.Path(code_path).parent / "verify"
+            if final_verify.exists():
+                shutil.rmtree(final_verify)
+            shutil.move(str(staged_verify), str(final_verify))
 
     # Save per-turn and combined videos
     if recording_frames and turn_frame_ranges:

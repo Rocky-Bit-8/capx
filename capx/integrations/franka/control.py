@@ -32,6 +32,7 @@ from capx.integrations.franka.common import (
     save_segmentation_debug,
     select_instance_from_box,
 )
+from capx.integrations.franka.verify import FrankaVerifyApi
 from capx.utils.visualization_utils import (
     draw_oriented_bounding_box,
     overlay_segmentation_masks,
@@ -91,6 +92,7 @@ class FrankaControlApi(ApiBase):
             else init_pyroki_local(self._env)
         )
         self.cfg = None
+        self.verify_api = FrankaVerifyApi(env)
 
     def functions(self) -> dict[str, Any]:
         fns = {
@@ -104,7 +106,44 @@ class FrankaControlApi(ApiBase):
         }
         if not self.real: # Only include home pose in simulation
             fns["home_pose"] = self.home_pose
+        fns.update(self.verify_api.functions())
         return fns
+
+    def set_verify_output_dir(self, output_dir: str | pathlib.Path | None) -> None:
+        """Set the directory used for optional verification artifacts."""
+        self.verify_api.set_verify_output_dir(output_dir)
+
+    def _verify_sim_ee_pose(self) -> tuple[np.ndarray, np.ndarray] | None:
+        try:
+            sim = getattr(getattr(self._env, "robosuite_env", None), "sim", None)
+            if sim is None:
+                sim = getattr(self._env, "sim", None)
+            body_id = getattr(self._env, "gripper_link_idx", None)
+            if sim is None or body_id is None:
+                return None
+            return (
+                np.asarray(sim.data.xpos[body_id], dtype=np.float64).copy(),
+                np.asarray(sim.data.xquat[body_id], dtype=np.float64).copy(),
+            )
+        except Exception:
+            return None
+
+    def _verify_record_ik(
+        self,
+        target: np.ndarray,
+        joints: np.ndarray,
+        phase: str,
+        target_quat: np.ndarray,
+    ) -> None:
+        target_frame = "world" if self.real else "base"
+        self.verify_api.verify_record_ik(
+            target,
+            self._verify_sim_ee_pose(),
+            joints,
+            phase,
+            target_frame,
+            target_quat,
+        )
 
     # def get_observation(self) -> dict[str, Any]:
     #     """Get the observation of the environment.
@@ -506,6 +545,7 @@ class FrankaControlApi(ApiBase):
             joints_z_offset = np.asarray(self.cfg[:-1], dtype=np.float64).reshape(7)
 
             self._env.move_to_joints_blocking(joints_z_offset)
+            self._verify_record_ik(z_offset_pos, joints_z_offset, "approach", quat_wxyz)
 
         if self.cfg is None or self.real:
             self.cfg = self.ik_solve_fn(
@@ -531,6 +571,7 @@ class FrankaControlApi(ApiBase):
             #             prev_cfg = self.cfg
         joints = np.asarray(self.cfg[:-1], dtype=np.float64).reshape(7)
         self._env.move_to_joints_blocking(joints)
+        self._verify_record_ik(offset_pos, joints, "final", quat_wxyz)
         self._log_step_update(text="Motion complete.")
 
     def home_pose(self) -> None:

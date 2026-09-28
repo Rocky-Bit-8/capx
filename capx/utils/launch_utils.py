@@ -10,6 +10,7 @@ import logging
 import multiprocessing
 import os
 import time
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -395,10 +396,7 @@ def _save_trial_artifacts(
     """
     if not config["output_dir"]:
         return None
-    trial_dir = (
-        Path(config["output_dir"])
-        / f"trial_{trial:02d}_sandboxrc_{sandbox_rc}_reward_{reward:.3f}_taskcompleted_{int(task_completed)}"
-    )
+    trial_dir = trial_artifact_dir(config, trial, sandbox_rc, reward, task_completed)
     trial_dir.mkdir(parents=True, exist_ok=True)
 
     code_path_obj = trial_dir / "code.py"
@@ -459,6 +457,20 @@ def _save_trial_artifacts(
         img.save(trial_dir / f"visual_feedback_{i:02d}.png")
 
     return code_path
+
+
+def trial_artifact_dir(
+    config: dict[str, Any], trial: int, sandbox_rc: int, reward: float, task_completed: bool
+) -> Path:
+    """Return a stable timestamp-prefixed directory for one episode."""
+    stamps = config.setdefault("_trial_episode_stamps", {})
+    # Match the requested compact form, e.g. 928_1544 (no leading month zero).
+    stamp = stamps.setdefault(trial, datetime.now().strftime("%-m%-d_%H%M"))
+    return (
+        Path(config["output_dir"])
+        / f"{stamp}_trial_{trial:02d}_sandboxrc_{sandbox_rc}_reward_{reward:.3f}"
+        f"_taskcompleted_{int(task_completed)}"
+    )
 
 
 

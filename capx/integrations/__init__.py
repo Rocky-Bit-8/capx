@@ -9,6 +9,7 @@ from .franka.control_reduced_exampleless import FrankaControlApiReducedExamplele
 from .franka.nut_assembly_privileged import FrankaControlNutAssemblyPrivilegedApi
 from .franka.nut_assembly_visual import FrankaControlNutAssemblyVisualApi
 from .franka.nut_assembly_molmo import FrankaControlNutAssemblyMolmoApi
+from .franka.verify import FrankaVerifyApi
 from .franka.spill_wipe import FrankaControlSpillWipeApi, FrankaControlSpillWipeTableApi
 from .franka.spill_wipe_privileged import FrankaControlSpillWipePrivilegedApi
 from .franka.handover_privileged import FrankaHandoverPrivilegedApi
@@ -110,6 +111,7 @@ register_api(
 register_api("FrankaControlNutAssemblyPrivilegedApi", FrankaControlNutAssemblyPrivilegedApi)
 register_api("FrankaControlNutAssemblyVisualApi", FrankaControlNutAssemblyVisualApi)
 register_api("FrankaControlNutAssemblyMolmoApi", FrankaControlNutAssemblyMolmoApi)
+register_api("FrankaVerifyApi", FrankaVerifyApi)
 register_api(
     "FrankaControlNutAssemblyApiReduced",
     lambda env: FrankaControlApiReduced(env, is_peg_assembly=True),

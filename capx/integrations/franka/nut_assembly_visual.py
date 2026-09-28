@@ -14,7 +14,8 @@ from capx.envs.base import (
 )
 from capx.integrations.base_api import ApiBase
 from capx.integrations.vision.molmo import init_molmo
-from capx.integrations.motion.pyroki import init_pyroki_remote
+from capx.integrations.motion.pyroki import init_pyroki_local
+from capx.integrations.franka.verify import FrankaVerifyRecorder
 from capx.integrations.vision.sam3 import init_sam3_point_prompt
 from capx.utils.camera_utils import obs_get_rgb
 from capx.utils.depth_utils import (
@@ -52,52 +53,55 @@ class FrankaControlNutAssemblyVisualApi(ApiBase):
         # self._robot = ctx.robot
         # self._target_link_name = ctx.target_link_name
         # self._pks = pks
-        # Nut Assembly configs launch the PyRoKI HTTP service alongside the
-        # simulator. Bind explicitly to that backend; init_pyroki() cannot
-        # infer a backend during API construction because it has no env arg.
-        self.ik_solve_fn = init_pyroki_remote(
-            os.environ.get("PYROKI_SERVICE_URL", "http://127.0.0.1:8116")
-        )
+        # Simulation Nut Assembly must use the MuJoCo-bound IK implementation.
+        # The HTTP PyRoKI backend is reserved for real-robot control.
+        self.ik_solve_fn = init_pyroki_local(self._env)
         self.cfg: np.ndarray | None = None
         self.camera_name = "robot0_robotview"
         # Diagnostics are opt-in and never participate in control decisions.
-        self._verify_dir: pathlib.Path | None = None
-        self._verify_image_index = 0
+        self.verify_recorder = FrankaVerifyRecorder()
 
     def set_verify_output_dir(self, output_dir: str | os.PathLike[str] | None) -> None:
         """Set the directory for optional SAM/Molmo/IK verification artifacts."""
-        self._verify_dir = pathlib.Path(output_dir) if output_dir else None
-        if self._verify_dir is not None:
-            self._verify_dir.mkdir(parents=True, exist_ok=True)
+        self.verify_recorder.set_output_dir(output_dir)
 
     def _verify_path(self) -> pathlib.Path:
-        if self._verify_dir is None:
-            self._verify_dir = pathlib.Path("/home/rocky/Code/cap-x-main/bin/verify")
-            self._verify_dir.mkdir(parents=True, exist_ok=True)
-        return self._verify_dir
+        return self.verify_recorder.path()
 
     def _save_verify_image(self, image: Image.Image, stem: str) -> None:
         try:
-            path = self._verify_path() / f"{self._verify_image_index:04d}_{stem}.png"
-            image.save(path)
-            self._verify_image_index += 1
+            self.verify_recorder.save_image(image, stem)
         except Exception as exc:  # diagnostics must never affect control
             print(f"[verify] Could not save image: {exc}")
 
-    def _record_ik_vector(self, target: np.ndarray, actual: np.ndarray | None) -> None:
-        if actual is None:
+    def _record_ik_vector(
+        self,
+        target: np.ndarray,
+        target_world: np.ndarray,
+        actual_pose: tuple[np.ndarray, np.ndarray] | None,
+        returned_joints: np.ndarray,
+        *,
+        phase: str,
+        target_quat: np.ndarray,
+        target_world_quat: np.ndarray,
+    ) -> None:
+        if actual_pose is None:
             return
         try:
-            path = self._verify_path() / "goto_pose_vectors.csv"
-            if not path.exists():
-                path.write_text("target_x,target_y,target_z,actual_x,actual_y,actual_z\n")
-            with path.open("a") as f:
-                values = np.concatenate([np.asarray(target).reshape(3), np.asarray(actual).reshape(3)])
-                f.write(",".join(f"{float(v):.9f}" for v in values) + "\n")
+            self.verify_recorder.record_ik(
+                target,
+                actual_pose,
+                returned_joints,
+                phase=phase,
+                target_frame="base",
+                transformed_target=target_world,
+                target_quat=target_quat,
+                transformed_target_quat=target_world_quat,
+            )
         except Exception as exc:
             print(f"[verify] Could not record IK vector: {exc}")
 
-    def _sim_ee_position(self) -> np.ndarray | None:
+    def _sim_ee_pose(self) -> tuple[np.ndarray, np.ndarray] | None:
         try:
             env = self._env
             sim = getattr(getattr(env, "robosuite_env", None), "sim", None)
@@ -109,9 +113,30 @@ class FrankaControlNutAssemblyVisualApi(ApiBase):
             body_id = getattr(env, "gripper_link_idx", None)
             if sim is None or body_id is None:
                 return None
-            return np.asarray(sim.data.xpos[body_id], dtype=np.float64).copy()
+            return (
+                np.asarray(sim.data.xpos[body_id], dtype=np.float64).copy(),
+                np.asarray(sim.data.xquat[body_id], dtype=np.float64).copy(),
+            )
         except Exception:
             return None
+
+    def _local_ik_target_to_world_pose(
+        self, position: np.ndarray, quat_wxyz: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Mirror the local IK solver's base-to-world target conversion for logs."""
+        base_pose = np.asarray(self._env.base_link_wxyz_xyz, dtype=np.float64).reshape(7)
+        base_rot = SciRotation.from_quat(
+            [base_pose[1], base_pose[2], base_pose[3], base_pose[0]]
+        )
+        target_rot = SciRotation.from_quat(
+            [quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]]
+        )
+        world_rot = base_rot * target_rot
+        world_xyzw = world_rot.as_quat()
+        return (
+            base_pose[4:] + base_rot.apply(np.asarray(position, dtype=np.float64).reshape(3)),
+            np.array([world_xyzw[3], *world_xyzw[:3]], dtype=np.float64),
+        )
 
     def functions(self) -> dict[str, Any]:
         return {
@@ -353,7 +378,6 @@ class FrankaControlNutAssemblyVisualApi(ApiBase):
             z_approach != 0.0
         ):  # If z_approach is not 0.0, approach the object from above by z_approach meters
             z_offset_pos = offset_pos + rot.apply(np.array([0, 0, -z_approach]))
-
             if self.cfg is None:
                 self.cfg = self.ik_solve_fn(
                     target_pose_wxyz_xyz=np.concatenate([quat_wxyz, z_offset_pos]),
@@ -366,7 +390,16 @@ class FrankaControlNutAssemblyVisualApi(ApiBase):
             joints_z_offset = np.asarray(self.cfg[:-1], dtype=np.float64).reshape(7)
 
             self._env.move_to_joints_blocking(joints_z_offset)
-            self._record_ik_vector(z_offset_pos, self._sim_ee_position())
+            world_pos, world_quat = self._local_ik_target_to_world_pose(z_offset_pos, quat_wxyz)
+            self._record_ik_vector(
+                z_offset_pos,
+                world_pos,
+                self._sim_ee_pose(),
+                joints_z_offset,
+                phase="approach",
+                target_quat=quat_wxyz,
+                target_world_quat=world_quat,
+            )
 
         if self.cfg is None:
             self.cfg = self.ik_solve_fn(
@@ -379,7 +412,16 @@ class FrankaControlNutAssemblyVisualApi(ApiBase):
             )
         joints = np.asarray(self.cfg[:-1], dtype=np.float64).reshape(7)
         self._env.move_to_joints_blocking(joints)
-        self._record_ik_vector(offset_pos, self._sim_ee_position())
+        world_pos, world_quat = self._local_ik_target_to_world_pose(offset_pos, quat_wxyz)
+        self._record_ik_vector(
+            offset_pos,
+            world_pos,
+            self._sim_ee_pose(),
+            joints,
+            phase="final",
+            target_quat=quat_wxyz,
+            target_world_quat=world_quat,
+        )
 
     def open_gripper(self) -> None:
         """Open gripper fully.
