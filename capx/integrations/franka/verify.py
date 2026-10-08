@@ -65,56 +65,59 @@ class FrankaVerifyRecorder:
             actual, actual_quat = actual_pose
             actual = np.asarray(actual, dtype=np.float64).reshape(3)
             actual_quat = np.asarray(actual_quat, dtype=np.float64).reshape(4)
-            input_quat = None if target_quat is None else np.asarray(target_quat, dtype=np.float64).reshape(4)
-            target_quat_world = None if transformed_target_quat is None else np.asarray(transformed_target_quat, dtype=np.float64).reshape(4)
-            returned_joints = np.asarray(returned_joints, dtype=np.float64).reshape(7)
             error = actual - target
             row: dict[str, Any] = {
-                "target_x": target[0], "target_y": target[1], "target_z": target[2],
-                "actual_x": actual[0], "actual_y": actual[1], "actual_z": actual[2],
-                "input_target_x": input_target[0], "input_target_y": input_target[1],
-                "input_target_z": input_target[2],
-                "target_frame": "world", "input_target_frame": target_frame,
-                "call_index": self._verify_motion_index, "phase": phase,
-                "error_x": error[0], "error_y": error[1], "error_z": error[2],
-                "error_abs_x": abs(error[0]), "error_abs_y": abs(error[1]),
-                "error_abs_z": abs(error[2]), "position_error_m": float(np.linalg.norm(error)),
-                "actual_qw": actual_quat[0], "actual_qx": actual_quat[1],
-                "actual_qy": actual_quat[2], "actual_qz": actual_quat[3],
+                # Position columns are intentionally interleaved target/actual.
+                "world_target_x": target[0], "actual_x": actual[0],
+                "world_target_y": target[1], "actual_y": actual[1],
+                "world_target_z": target[2], "actual_z": actual[2],
+                "target_direction_x": "", "target_direction_y": "",
+                "target_direction_z": "", "actual_direction_x": "",
+                "actual_direction_y": "", "actual_direction_z": "",
+                "abs_position_error": float(np.linalg.norm(error)),
+                "abs_orientation_error_deg": "",
             }
-            if input_quat is not None and target_quat_world is not None:
+            target_quat_world = (
+                None
+                if transformed_target_quat is None
+                else np.asarray(transformed_target_quat, dtype=np.float64).reshape(4)
+            )
+            if target_quat_world is not None:
+                target_rotation = Rotation.from_quat(
+                    [
+                        target_quat_world[1], target_quat_world[2],
+                        target_quat_world[3], target_quat_world[0],
+                    ]
+                )
+                actual_rotation = Rotation.from_quat(
+                    [actual_quat[1], actual_quat[2], actual_quat[3], actual_quat[0]]
+                )
+                # Direction vector means the world direction of the pose's
+                # local +Z axis, i.e. the third column of its rotation matrix.
+                target_direction = target_rotation.apply([0.0, 0.0, 1.0])
+                actual_direction = actual_rotation.apply([0.0, 0.0, 1.0])
                 quat_error = Rotation.from_quat(
                     [actual_quat[1], actual_quat[2], actual_quat[3], actual_quat[0]]
-                ) * Rotation.from_quat(
-                    [target_quat_world[1], target_quat_world[2], target_quat_world[3], target_quat_world[0]]
-                ).inv()
-                quat_error_xyzw = quat_error.as_quat()
-                quat_error_wxyz = np.array([quat_error_xyzw[3], *quat_error_xyzw[:3]])
-                row.update({f"target_q{axis}": input_quat[i] for i, axis in enumerate("wxyz")})
-                row.update({f"target_world_q{axis}": target_quat_world[i] for i, axis in enumerate("wxyz")})
-                row.update({f"quat_error_q{axis}": quat_error_wxyz[i] for i, axis in enumerate("wxyz")})
-                # Axis-angle rotation vector in world coordinates (radians).
-                # This is the 3-D vector representation of the target
-                # orientation: vector direction is the rotation axis and its
-                # magnitude is the rotation angle.
-                target_world_rotvec = Rotation.from_quat(
-                    [
-                        target_quat_world[1],
-                        target_quat_world[2],
-                        target_quat_world[3],
-                        target_quat_world[0],
-                    ]
-                ).as_rotvec()
+                ) * target_rotation.inv()
                 row.update(
                     {
-                        "target_world_rotvec_x": target_world_rotvec[0],
-                        "target_world_rotvec_y": target_world_rotvec[1],
-                        "target_world_rotvec_z": target_world_rotvec[2],
+                        "target_direction_x": target_direction[0],
+                        "target_direction_y": target_direction[1],
+                        "target_direction_z": target_direction[2],
+                        "actual_direction_x": actual_direction[0],
+                        "actual_direction_y": actual_direction[1],
+                        "actual_direction_z": actual_direction[2],
+                        "abs_orientation_error_deg": float(
+                            np.degrees(quat_error.magnitude())
+                        ),
                     }
                 )
-                row["orientation_error_rad"] = float(quat_error.magnitude())
-                row["orientation_error_deg"] = float(np.degrees(quat_error.magnitude()))
-            row.update({f"returned_joint_{i}": returned_joints[i] for i in range(7)})
+            else:
+                for name in (
+                    "target_direction_x", "target_direction_y", "target_direction_z",
+                    "actual_direction_x", "actual_direction_y", "actual_direction_z",
+                ):
+                    row[name] = ""
             path = self.path() / "goto_pose_vectors.csv"
             fieldnames = list(row)
             old_rows: list[dict[str, str]] = []

@@ -9,6 +9,29 @@ import numpy as np
 from capx.envs.base import BaseEnv
 from capx.integrations.franka.control import FrankaControlApi
 
+SAM3_VISUAL_ALIASES: dict[str, tuple[str, ...]] = {
+    "red cube": ("red block", "red object", "cube"),
+    "green cube": ("green block", "green object", "cube"),
+}
+
+
+def wrap_sam3_with_aliases(sam3_seg_fn: Any) -> Any:
+    """Wrap a SAM3 segment_fn so every text prompt falls back to visual aliases."""
+
+    def segment_with_aliases(
+        image: np.ndarray, text_prompt: str
+    ) -> list[dict[str, Any]]:
+        prompts = (text_prompt, *SAM3_VISUAL_ALIASES.get(text_prompt.lower(), ()))
+        for prompt in prompts:
+            results = sam3_seg_fn(image, text_prompt=prompt)
+            if results:
+                if prompt != text_prompt:
+                    print(f"SAM3 fallback prompt '{prompt}' selected for '{text_prompt}'")
+                return results
+        return []
+
+    return segment_with_aliases
+
 
 class FrankaCubeSafetyApi(FrankaControlApi):
     """Franka control API for cube lifting, stacking, and restacking tasks.
@@ -22,6 +45,10 @@ class FrankaCubeSafetyApi(FrankaControlApi):
 
     def __init__(self, env: BaseEnv, **kwargs: Any) -> None:
         super().__init__(env, **kwargs)
+        if self.use_sam3:
+            # Parent methods call self.sam3_seg_fn directly; wrapping it here
+            # enables alias fallback without modifying FrankaControlApi.
+            self.sam3_seg_fn = wrap_sam3_with_aliases(self.sam3_seg_fn)
 
     def _move_to_clearance(self) -> None:
         """Raise the current TCP by 8cm along the base-frame vertical axis."""

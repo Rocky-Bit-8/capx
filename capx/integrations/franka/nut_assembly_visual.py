@@ -146,7 +146,23 @@ class FrankaControlNutAssemblyVisualApi(ApiBase):
             "goto_home_joint_position": self.goto_home_joint_position,
             "open_gripper": self.open_gripper,
             "close_gripper": self.close_gripper,
+            "point_prompt_molmo": self.point_prompt_molmo,
         }
+
+    def point_prompt_molmo(
+        self, text_prompt: str
+    ) -> dict[str, tuple[int | None, int | None]]:
+        """Return Molmo's pixel point for the current robot-view image."""
+        if not isinstance(text_prompt, str) or not text_prompt.strip():
+            raise ValueError("text_prompt must be a non-empty string")
+        obs = self._env.get_observation()
+        rgb_images = obs_get_rgb(obs)
+        if not rgb_images:
+            raise RuntimeError("No RGB image in Nut Assembly observation")
+        image = Image.fromarray(next(iter(rgb_images.values()))).convert("RGB")
+        result = self.molmo_point_fn(image, objects=[text_prompt])
+        self._log_step_update(text=f"Molmo point for '{text_prompt}': {result}")
+        return result
 
     def get_object_pose(self, object_name: str) -> tuple[np.ndarray, np.ndarray]:
         """Get the pose of an object in the environment from a natural language description.

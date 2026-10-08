@@ -12,7 +12,7 @@ from capx.envs.base import (
     BaseEnv,
 )
 from capx.integrations.base_api import ApiBase
-from capx.integrations.motion.pyroki import init_pyroki_remote
+from capx.integrations.motion.pyroki import init_pyroki_local
 from capx.integrations.vision.sam3 import init_sam3
 from capx.utils.camera_utils import obs_get_rgb
 from capx.utils.depth_utils import (
@@ -22,7 +22,7 @@ from capx.utils.depth_utils import (
 
 
 # ------------------------------- Control API ------------------------------
-class FrankaControlNutAssemblyVisualApi(ApiBase):
+class FrankaControlNutAssemblyGeometricApi(ApiBase):
     """Robot control helpers for Franka.
 
     Functions:
@@ -60,7 +60,7 @@ class FrankaControlNutAssemblyVisualApi(ApiBase):
         # self._robot = ctx.robot
         # self._target_link_name = ctx.target_link_name
         # self._pks = pks
-        self.ik_solve_fn = init_pyroki_remote()
+        self.ik_solve_fn = init_pyroki_local(self._env)
         self.cfg: np.ndarray | None = None
         self.camera_name = "robot0_robotview"
 

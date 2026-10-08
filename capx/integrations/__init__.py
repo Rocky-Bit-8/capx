@@ -7,9 +7,9 @@ from .franka.control_reduced import FrankaControlApiReduced
 from .franka.control_reduced_skill_library import FrankaControlApiReducedSkillLibrary
 from .franka.control_reduced_exampleless import FrankaControlApiReducedExampleless
 from .franka.nut_assembly_privileged import FrankaControlNutAssemblyPrivilegedApi
+from .franka.nut_assembly_geometric import FrankaControlNutAssemblyGeometricApi
 from .franka.nut_assembly_visual import FrankaControlNutAssemblyVisualApi
 from .franka.nut_assembly_guide import FrankaControlNutAssemblyGuideApi
-from .franka.nut_assembly_molmo import FrankaControlNutAssemblyMolmoApi
 from .franka.verify import FrankaVerifyApi
 from .franka.spill_wipe import FrankaControlSpillWipeApi, FrankaControlSpillWipeTableApi
 from .franka.spill_wipe_privileged import FrankaControlSpillWipePrivilegedApi
@@ -110,9 +110,9 @@ register_api(
 )
 
 register_api("FrankaControlNutAssemblyPrivilegedApi", FrankaControlNutAssemblyPrivilegedApi)
+register_api("FrankaControlNutAssemblyGeometricApi", FrankaControlNutAssemblyGeometricApi)
 register_api("FrankaControlNutAssemblyVisualApi", FrankaControlNutAssemblyVisualApi)
 register_api("FrankaControlNutAssemblyGuideApi", FrankaControlNutAssemblyGuideApi)
-register_api("FrankaControlNutAssemblyMolmoApi", FrankaControlNutAssemblyMolmoApi)
 register_api("FrankaVerifyApi", FrankaVerifyApi)
 register_api(
     "FrankaControlNutAssemblyApiReduced",

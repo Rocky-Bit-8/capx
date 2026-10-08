@@ -181,21 +181,6 @@ class FrankaControlApi(ApiBase):
     ) -> tuple[int, np.ndarray]:
         return select_instance_from_box(segmentation, box)
 
-    def _segment_sam3_with_aliases(self, rgb: np.ndarray, object_name: str) -> tuple[list[dict[str, Any]], str]:
-        """Query SAM3 with the requested name, then simple visual aliases."""
-        aliases = {
-            "red cube": ("red block", "red object", "cube"),
-            "green cube": ("green block", "green object", "cube"),
-        }
-        prompts = (object_name, *aliases.get(object_name.lower(), ()))
-        for prompt in prompts:
-            results = self.sam3_seg_fn(rgb, text_prompt=prompt)
-            if results:
-                if prompt != object_name:
-                    print(f"SAM3 fallback prompt '{prompt}' selected for '{object_name}'")
-                return results, prompt
-        return [], object_name
-
     def get_object_pose(
         self, object_name: str, return_bbox_extent: bool = False
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
@@ -233,9 +218,9 @@ class FrankaControlApi(ApiBase):
 
         if self.use_sam3:
             self._log_step("SAM3 Segmentation", f"Running SAM3 text-prompt segmentation for '{object_name}' …")
-            results, prompt_used = self._segment_sam3_with_aliases(rgb, object_name)
+            results = self.sam3_seg_fn(rgb, text_prompt=object_name)
             if len(results) == 0:
-                raise ValueError(f"No SAM3 detections for '{object_name}' (including visual aliases)")
+                raise ValueError("No sam3 detections")
             scores = [result["score"] for result in results]
 
             box = results[np.argmax(scores)]["box"]
@@ -252,11 +237,9 @@ class FrankaControlApi(ApiBase):
             vis_masks = [r["mask"] for r in results if r.get("score", 0) > 0.05]
             if vis_masks:
                 vis = overlay_segmentation_masks(rgb, vis_masks)
-                self._log_step_update(
-                    text=f"Best detection score: {max(scores):.3f} (prompt: '{prompt_used}')", images=vis
-                )
+                self._log_step_update(text=f"Best detection score: {max(scores):.3f}", images=vis)
             else:
-                self._log_step_update(text=f"Best detection score: {max(scores):.3f} (prompt: '{prompt_used}')")
+                self._log_step_update(text=f"Best detection score: {max(scores):.3f}")
             idxs = np.where(mask.flatten()[binary_map_nan_is_zero.flatten().astype(bool)].astype(bool))
         else:
             self._log_step("OWL-ViT Detection", f"Running OWL-ViT detection for '{object_name}' …")
@@ -378,9 +361,9 @@ class FrankaControlApi(ApiBase):
 
         if self.use_sam3:
             self._log_step("SAM3 Segmentation", f"Running SAM3 for grasp target '{object_name}' …")
-            results, _ = self._segment_sam3_with_aliases(rgb, object_name)
+            results = self.sam3_seg_fn(rgb, text_prompt=object_name)
             if len(results) == 0:
-                raise ValueError(f"No SAM3 detections for '{object_name}' (including visual aliases)")
+                raise ValueError("No sam3 detections")
             scores = [result["score"] for result in results]
 
             box = results[np.argmax(scores)]["box"]

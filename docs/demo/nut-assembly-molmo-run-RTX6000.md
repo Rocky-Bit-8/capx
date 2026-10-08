@@ -42,10 +42,20 @@ ssh -p 19154 root@connect.weste.seetacloud.com \
   '/root/autodl-tmp/start_molmo_vllm.sh'
 ```
 
+```bash
+ssh -p 28156 root@connect.westd.seetacloud.com \
+  '/root/autodl-tmp/start_molmo_vllm.sh'
+```
+
 远程检查模型加载完成：
 
 ```bash
 ssh -p 19154 root@connect.weste.seetacloud.com \
+  'curl -fsS http://127.0.0.1:8122/v1/models'
+```
+
+```bash
+ssh -p 28156 root@connect.westd.seetacloud.com \
   'curl -fsS http://127.0.0.1:8122/v1/models'
 ```
 
@@ -70,10 +80,19 @@ rm -f /root/autodl-tmp/molmo-vllm.log
 
 保持以下命令运行：
 
+
+西BG13
 ```bash
 ssh -N -o ExitOnForwardFailure=yes \
   -L 8122:127.0.0.1:8122 \
   -p 19154 root@connect.weste.seetacloud.com
+```
+
+西B719
+```bash
+ssh -N -o ExitOnForwardFailure=yes \
+  -L 8122:127.0.0.1:8122 \
+  -p 28156 root@connect.westd.seetacloud.com
 ```
 
 另开终端验证本地转发：
